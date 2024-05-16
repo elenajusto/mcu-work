@@ -73,7 +73,7 @@ static void MX_RTC_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+	personFoundFlag = 0;	// Set flag to zero at start
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -339,6 +339,48 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+
+	/* Check if person found */
+	void stateHandler(int flag){
+
+	}
+
+	/* Looking for person */
+	void stateA(){
+		yellowLedFlag = 1;
+		redLedFlag = 0;
+		buzzerFlag = 0;
+		lcdFlag = 0;
+	}
+
+	/* Person found */
+	void stateB(){
+		yellowLedFlag = 0;
+		redLedFlag = 1;
+		buzzerFlag = 1;
+		lcdFlag = 1;
+	}
+
+	/* Control yellow LED blink */
+	void yellowBlink(){
+
+	}
+
+	/* Control red LED flash */
+	void redFlash(){
+
+	}
+
+	/* Control buzzer */
+	void buzzer(){
+
+	}
+
+	/* Control LCD */
+	void lcdControl(){
+
+	}
 
 /* USER CODE END 4 */
 
