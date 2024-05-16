@@ -49,6 +49,15 @@ TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 
+	// System Flags
+	int personFoundFlag;
+
+	// Hardware Flags
+	int yellowLedFlag;
+	int redLedFlag;
+	int buzzerFlag;
+	int lcdFlag;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,6 +67,14 @@ static void MX_DMA_Init(void);
 static void MX_CRC_Init(void);
 static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
+
+	void stateHandler(int flag);
+	void stateA();
+	void stateB();
+	void yellowBlink();
+	void redFlash();
+	void buzzer();
+	void lcdControl();
 
 /* USER CODE END PFP */
 
@@ -343,7 +360,11 @@ static void MX_GPIO_Init(void)
 
 	/* Check if person found */
 	void stateHandler(int flag){
-
+		if (flag == 1){
+			stateB();
+		} else if (flag == 0){
+			stateA();
+		}
 	}
 
 	/* Looking for person */

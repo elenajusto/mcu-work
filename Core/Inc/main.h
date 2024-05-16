@@ -70,15 +70,6 @@ void MX_TIM3_Init(void);
 
 /* USER CODE BEGIN Private defines */
 
-// System Flags
-int personFoundFlag;
-
-// Hardware Flags
-int yellowLedFlag;
-int redLedFlag;
-int buzzerFlag;
-int lcdFlag;
-
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
