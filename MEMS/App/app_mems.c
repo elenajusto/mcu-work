@@ -60,6 +60,7 @@ uint16_t Sensitivity;
 uint8_t DiscardSamples;
 
 /* Extern variables ----------------------------------------------------------*/
+extern int personFound;
 /* Private macro -------------------------------------------------------------*/
 /* Private variables ---------------------------------------------------------*/
 static int16_t TAmbRaw; /* Tambient data [LSB] */
@@ -108,7 +109,11 @@ void MX_MEMS_Process(void)
   MX_PresenceDetection_Process();
 
   /* USER CODE BEGIN MEMS_Process_PostTreatment */
-
+  if ((TAmbRaw+500)<TObjRaw) {
+  	  personFound = 1;
+    } else {
+  	  personFound = 0;
+    }
   /* USER CODE END MEMS_Process_PostTreatment */
 }
 
