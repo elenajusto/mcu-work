@@ -25,57 +25,34 @@ extern "C" {
 #include "main.h"
 #include <stdio.h>
 
-#include "stm32f4xx_hal.h"
+#include "iks02a1_motion_sensors.h"
 #include "stm32f4xx_nucleo.h"
-#include "com.h"
-#include "demo_serial.h"
-#include "bsp_ip_conf.h"
-#include "fw_version.h"
-#include "infrared_pd_manager.h"
+#include "math.h"
 
 /* Private typedef -----------------------------------------------------------*/
+typedef struct displayFloatToInt_s {
+  int8_t sign; /* 0 means positive, 1 means negative*/
+  uint32_t  out_int;
+  uint32_t  out_dec;
+} displayFloatToInt_t;
+
 /* Private define ------------------------------------------------------------*/
-#define DWT_LAR_KEY  0xC5ACCE55 /* DWT register unlock key */
-#define ALGO_FREQ  30U /* Algorithm frequency between 1 and 30 Hz */
-#define TEMP_ODR  ((float)ALGO_FREQ)
-#define AVG_TMOS  32U
+#define MAX_BUF_SIZE 256
 
-/* Public variables ----------------------------------------------------------*/
-volatile uint8_t DataLoggerActive = 0;
-volatile uint32_t SensorsEnabled = 0;
-char LibVersion[35];
-int LibVersionLen;
-volatile uint8_t SensorReadRequest = 0;
-uint8_t UseOfflineData = 0;
-offline_data_t OfflineData[OFFLINE_DATA_SIZE];
-int OfflineDataReadIndex = 0;
-int OfflineDataWriteIndex = 0;
-int OfflineDataCount = 0;
-uint32_t AlgoFreq = ALGO_FREQ;
-uint8_t Odr;
-uint16_t AvgTmos;
-uint8_t AvgT;
-uint8_t GainFactor;
-uint16_t Sensitivity;
-uint8_t DiscardSamples;
-
-/* Extern variables ----------------------------------------------------------*/
-/* Private macro -------------------------------------------------------------*/
 /* Private variables ---------------------------------------------------------*/
-static int16_t TAmbRaw; /* Tambient data [LSB] */
-static int16_t TObjRaw; /* Tobject data [LSB] */
+static volatile uint8_t PushButtonDetected = 0;
+static uint8_t verbose = 1;  /* Verbose output to UART terminal ON/OFF. */
+static IKS02A1_MOTION_SENSOR_Capabilities_t MotionCapabilities[IKS02A1_MOTION_INSTANCES_NBR];
+static char dataOut[MAX_BUF_SIZE];
+static int32_t PushButtonState = GPIO_PIN_RESET;
 
 /* Private function prototypes -----------------------------------------------*/
-static void MX_PresenceDetection_Init(void);
-static void MX_PresenceDetection_Process(void);
-static void PD_Data_Handler(TMsg *Msg);
-static void Init_Sensors(void);
-static void RTC_Handler(TMsg *Msg);
-static void Infrared_Sensor_Handler(TMsg *Msg);
-static void TIM_Config(uint32_t Freq);
-static void DWT_Init(void);
-static void DWT_Start(void);
-static uint32_t DWT_Stop(void);
+static void floatToInt(float in, displayFloatToInt_t *out_value, int32_t dec_prec);
+static void Accelero_Sensor_Handler(uint32_t Instance);
+static void Gyro_Sensor_Handler(uint32_t Instance);
+static void Magneto_Sensor_Handler(uint32_t Instance);
+static void MX_IKS02A1_DataLogTerminal_Init(void);
+static void MX_IKS02A1_DataLogTerminal_Process(void);
 
 void MX_MEMS_Init(void)
 {
@@ -89,7 +66,7 @@ void MX_MEMS_Init(void)
 
   /* Initialize the peripherals and the MEMS components */
 
-  MX_PresenceDetection_Init();
+  MX_IKS02A1_DataLogTerminal_Init();
 
   /* USER CODE BEGIN MEMS_Init_PostTreatment */
 
@@ -105,308 +82,330 @@ void MX_MEMS_Process(void)
 
   /* USER CODE END MEMS_Process_PreTreatment */
 
-  MX_PresenceDetection_Process();
+  MX_IKS02A1_DataLogTerminal_Process();
 
   /* USER CODE BEGIN MEMS_Process_PostTreatment */
 
   /* USER CODE END MEMS_Process_PostTreatment */
 }
 
-/* Exported functions --------------------------------------------------------*/
 /**
-  * @brief  Period elapsed callback
-  * @param  htim pointer to a TIM_HandleTypeDef structure that contains
-  *              the configuration information for TIM module.
+  * @brief  Initialize the DataLogTerminal application
   * @retval None
   */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+void MX_IKS02A1_DataLogTerminal_Init(void)
 {
-  if (htim->Instance == BSP_IP_TIM_Handle.Instance)
-  {
-    SensorReadRequest = 1;
-  }
-}
+  displayFloatToInt_t out_value_odr;
+  int i;
 
-/* Private functions ---------------------------------------------------------*/
-/**
-  * @brief  Initialize the application
-  * @retval None
-  */
-static void MX_PresenceDetection_Init(void)
-{
   /* Initialize LED */
   BSP_LED_Init(LED2);
+
+  /* Initialize button */
+  BSP_PB_Init(BUTTON_KEY, BUTTON_MODE_EXTI);
+
+  /* Check what is the Push Button State when the button is not pressed. It can change across families */
+  PushButtonState = (BSP_PB_GetState(BUTTON_KEY)) ?  0 : 1;
 
   /* Initialize Virtual COM Port */
   BSP_COM_Init(COM1);
 
-  /* Initialize Timer */
-  BSP_IP_TIM_Init();
+  IKS02A1_MOTION_SENSOR_Init(IKS02A1_ISM330DHCX_0, MOTION_ACCELERO | MOTION_GYRO);
 
-  /* Configure Timer to run with desired algorithm frequency */
-  TIM_Config(ALGO_FREQ);
+  IKS02A1_MOTION_SENSOR_Init(IKS02A1_IIS2DLPC_0, MOTION_ACCELERO);
 
-  /* Initialize (disabled) sensors */
-  Init_Sensors();
+  IKS02A1_MOTION_SENSOR_Init(IKS02A1_IIS2MDC_0, MOTION_MAGNETO);
 
-  Odr = (uint8_t)TEMP_ODR;
-  BSP_SENSOR_TEMP_GetAvgTmos(&AvgTmos);
-  BSP_SENSOR_TEMP_GetAvgT(&AvgT);
-  BSP_SENSOR_TEMP_GetGainFactor(&GainFactor);
-  BSP_SENSOR_TEMP_GetSensitivity(&Sensitivity);
-
-  /* PresenceDetection API initialization function */
-  InfraredPD_manager_init();
-
-  /* OPTIONAL */
-  /* Get library version */
-  InfraredPD_manager_get_version(LibVersion, &LibVersionLen);
-
-  DWT_Init();
-
-  BSP_LED_On(LED2);
-  HAL_Delay(500);
-  BSP_LED_Off(LED2);
-
-  /* Start receiving messages via DMA */
-  UART_StartReceiveMsg();
-}
-
-/**
-  * @brief  Process of the application
-  * @retval None
-  */
-static void MX_PresenceDetection_Process(void)
-{
-  static TMsg msg_dat;
-  static TMsg msg_cmd;
-
-  if (UART_ReceivedMSG((TMsg *)&msg_cmd) == 1)
+  for(i = 0; i < IKS02A1_MOTION_INSTANCES_NBR; i++)
   {
-    if (msg_cmd.Data[0] == DEV_ADDR)
-    {
-      (void)HandleMSG((TMsg *)&msg_cmd);
-    }
-  }
-
-  if (SensorReadRequest == 1U)
-  {
-    SensorReadRequest = 0;
-
-    /* Acquire data from enabled sensors and fill Msg stream */
-    RTC_Handler(&msg_dat);
-    Infrared_Sensor_Handler(&msg_dat);
-
-    if (DiscardSamples < 1U)
-    {
-      /* PresenceDetection specific part */
-      PD_Data_Handler(&msg_dat);
-    }
-
-    /* Send data stream */
-    INIT_STREAMING_HEADER(&msg_dat);
-    msg_dat.Len = STREAMING_MSG_LENGTH;
-
-    if (UseOfflineData == 1U)
-    {
-      OfflineDataCount--;
-      if (OfflineDataCount < 0)
-      {
-        OfflineDataCount = 0;
-      }
-
-      OfflineDataReadIndex++;
-      if (OfflineDataReadIndex >= OFFLINE_DATA_SIZE)
-      {
-        OfflineDataReadIndex = 0;
-      }
-
-      if (OfflineDataCount > 0)
-      {
-        SensorReadRequest = 1;
-      }
-    }
-
-    if (DiscardSamples > 0U)
-    {
-      DiscardSamples--;
-    }
-    else
-    {
-      UART_SendMsg(&msg_dat);
-    }
+    IKS02A1_MOTION_SENSOR_GetCapabilities(i, &MotionCapabilities[i]);
+    snprintf(dataOut, MAX_BUF_SIZE,
+             "\r\nMotion Sensor Instance %d capabilities: \r\n ACCELEROMETER: %d\r\n GYROSCOPE: %d\r\n MAGNETOMETER: %d\r\n LOW POWER: %d\r\n",
+             i, MotionCapabilities[i].Acc, MotionCapabilities[i].Gyro, MotionCapabilities[i].Magneto, MotionCapabilities[i].LowPower);
+    printf("%s", dataOut);
+    floatToInt(MotionCapabilities[i].AccMaxOdr, &out_value_odr, 3);
+    snprintf(dataOut, MAX_BUF_SIZE, " MAX ACC ODR: %d.%03d Hz, MAX ACC FS: %d\r\n", (int)out_value_odr.out_int,
+             (int)out_value_odr.out_dec, (int)MotionCapabilities[i].AccMaxFS);
+    printf("%s", dataOut);
+    floatToInt(MotionCapabilities[i].GyroMaxOdr, &out_value_odr, 3);
+    snprintf(dataOut, MAX_BUF_SIZE, " MAX GYRO ODR: %d.%03d Hz, MAX GYRO FS: %d\r\n", (int)out_value_odr.out_int,
+             (int)out_value_odr.out_dec, (int)MotionCapabilities[i].GyroMaxFS);
+    printf("%s", dataOut);
+    floatToInt(MotionCapabilities[i].MagMaxOdr, &out_value_odr, 3);
+    snprintf(dataOut, MAX_BUF_SIZE, " MAX MAG ODR: %d.%03d Hz, MAX MAG FS: %d\r\n", (int)out_value_odr.out_int,
+             (int)out_value_odr.out_dec, (int)MotionCapabilities[i].MagMaxFS);
+    printf("%s", dataOut);
   }
 }
 
 /**
-  * @brief  Initialize all sensors
-  * @param  None
-  * @retval None
+  * @brief  BSP Push Button callback
+  * @param  Button Specifies the pin connected EXTI line
+  * @retval None.
   */
-static void Init_Sensors(void)
+void BSP_PB_Callback(Button_TypeDef Button)
 {
-  BSP_SENSOR_ACC_Init();
-  BSP_SENSOR_GYR_Init();
-  BSP_SENSOR_MAG_Init();
-  BSP_SENSOR_PRESS_Init();
-  BSP_SENSOR_TEMP_Init();
-  BSP_SENSOR_HUM_Init();
-
-  BSP_SENSOR_TEMP_SetAvgTmos(AVG_TMOS);
-  BSP_SENSOR_TEMP_SetOutputDataRate(TEMP_ODR);
+  PushButtonDetected = 1;
 }
 
 /**
-  * @brief  Handles the time+date getting/sending
-  * @param  Msg the time+date part of the stream
+  * @brief  Process of the DataLogTerminal application
   * @retval None
   */
-static void RTC_Handler(TMsg *Msg)
+void MX_IKS02A1_DataLogTerminal_Process(void)
 {
-  uint8_t sub_sec = 0;
-  RTC_DateTypeDef sdatestructureget;
-  RTC_TimeTypeDef stimestructure;
-  uint32_t ans_uint32;
-  int32_t ans_int32;
-  uint32_t RtcSynchPrediv = hrtc.Init.SynchPrediv;
+  int i;
 
-  if (UseOfflineData == 1)
+  if (PushButtonDetected != 0U)
   {
-    Msg->Data[3] = (uint8_t)OfflineData[OfflineDataReadIndex].hours;
-    Msg->Data[4] = (uint8_t)OfflineData[OfflineDataReadIndex].minutes;
-    Msg->Data[5] = (uint8_t)OfflineData[OfflineDataReadIndex].seconds;
-    Msg->Data[6] = (uint8_t)OfflineData[OfflineDataReadIndex].subsec;
+    /* Debouncing */
+    HAL_Delay(50);
+
+    /* Wait until the button is released */
+    while ((BSP_PB_GetState( BUTTON_KEY ) == PushButtonState));
+
+    /* Debouncing */
+    HAL_Delay(50);
+
+    /* Reset Interrupt flag */
+    PushButtonDetected = 0;
+
+    /* Do nothing */
+  }
+
+  for(i = 0; i < IKS02A1_MOTION_INSTANCES_NBR; i++)
+  {
+    if(MotionCapabilities[i].Acc)
+    {
+      Accelero_Sensor_Handler(i);
+    }
+    if(MotionCapabilities[i].Gyro)
+    {
+      Gyro_Sensor_Handler(i);
+    }
+    if(MotionCapabilities[i].Magneto)
+    {
+      Magneto_Sensor_Handler(i);
+    }
+  }
+
+  HAL_Delay( 1000 );
+}
+
+/**
+  * @brief  Splits a float into two integer values.
+  * @param  in the float value as input
+  * @param  out_value the pointer to the output integer structure
+  * @param  dec_prec the decimal precision to be used
+  * @retval None
+  */
+static void floatToInt(float in, displayFloatToInt_t *out_value, int32_t dec_prec)
+{
+  if(in >= 0.0f)
+  {
+    out_value->sign = 0;
+  }else
+  {
+    out_value->sign = 1;
+    in = -in;
+  }
+
+  in = in + (0.5f / pow(10, dec_prec));
+  out_value->out_int = (int32_t)in;
+  in = in - (float)(out_value->out_int);
+  out_value->out_dec = (int32_t)trunc(in * pow(10, dec_prec));
+}
+
+/**
+  * @brief  Handles the accelerometer axes data getting/sending
+  * @param  Instance the device instance
+  * @retval None
+  */
+static void Accelero_Sensor_Handler(uint32_t Instance)
+{
+  float odr;
+  int32_t fullScale;
+  IKS02A1_MOTION_SENSOR_Axes_t acceleration;
+  displayFloatToInt_t out_value;
+  uint8_t whoami;
+
+  if (IKS02A1_MOTION_SENSOR_GetAxes(Instance, MOTION_ACCELERO, &acceleration))
+  {
+    snprintf(dataOut, MAX_BUF_SIZE, "\r\nACC[%d]: Error\r\n", (int)Instance);
   }
   else
   {
-    (void)HAL_RTC_GetTime(&hrtc, &stimestructure, FORMAT_BIN);
-    (void)HAL_RTC_GetDate(&hrtc, &sdatestructureget, FORMAT_BIN);
-
-    /* To be MISRA C-2012 compliant the original calculation:
-       sub_sec = ((((((int)RtcSynchPrediv) - ((int)stimestructure.SubSeconds)) * 100) / (RtcSynchPrediv + 1)) & 0xFF);
-       has been split to separate expressions */
-    ans_int32 = (RtcSynchPrediv - (int32_t)stimestructure.SubSeconds) * 100;
-    ans_int32 /= RtcSynchPrediv + 1;
-    ans_uint32 = (uint32_t)ans_int32 & 0xFFU;
-    sub_sec = (uint8_t)ans_uint32;
-
-    Msg->Data[3] = (uint8_t)stimestructure.Hours;
-    Msg->Data[4] = (uint8_t)stimestructure.Minutes;
-    Msg->Data[5] = (uint8_t)stimestructure.Seconds;
-    Msg->Data[6] = sub_sec;
+    snprintf(dataOut, MAX_BUF_SIZE, "\r\nACC_X[%d]: %d, ACC_Y[%d]: %d, ACC_Z[%d]: %d\r\n", (int)Instance,
+             (int)acceleration.x, (int)Instance, (int)acceleration.y, (int)Instance, (int)acceleration.z);
   }
-}
 
-/**
-  * @brief  Presence Detection data handler
-  * @param  Msg the Presence Detection data part of the stream
-  * @retval None
-  */
-static void PD_Data_Handler(TMsg *Msg)
-{
-  uint32_t elapsed_time_us = 0U;
-  IPD_input_t data_in = {.t_amb = 0, .t_obj = 0};
-  static IPD_output_t data_out;
+  printf("%s", dataOut);
 
-  if ((SensorsEnabled & TEMPERATURE_SENSOR) == TEMPERATURE_SENSOR)
+  if (verbose == 1)
   {
-    /* Fill input data */
-    data_in.t_amb = TAmbRaw;
-    data_in.t_obj = TObjRaw;
+    if (IKS02A1_MOTION_SENSOR_ReadID(Instance, &whoami))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "WHOAMI[%d]: Error\r\n", (int)Instance);
+    }
+    else
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "WHOAMI[%d]: 0x%x\r\n", (int)Instance, (int)whoami);
+    }
 
-    /* Run Presence Detection algorithm */
-    BSP_LED_On(LED2);
-    DWT_Start();
-    InfraredPD_manager_run(&data_in, &data_out);
-    elapsed_time_us = DWT_Stop();
-    BSP_LED_Off(LED2);
+    printf("%s", dataOut);
 
-    Serialize_s32(&Msg->Data[15], (int32_t)data_out.t_obj_comp, 4);
-    Serialize_s32(&Msg->Data[19], (int32_t)data_out.t_obj_change, 4);
-    Msg->Data[23] = (uint8_t)data_out.mot_flag;
-    Msg->Data[24] = (uint8_t)data_out.pres_flag;
+    if (IKS02A1_MOTION_SENSOR_GetOutputDataRate(Instance, MOTION_ACCELERO, &odr))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "ODR[%d]: ERROR\r\n", (int)Instance);
+    }
+    else
+    {
+      floatToInt(odr, &out_value, 3);
+      snprintf(dataOut, MAX_BUF_SIZE, "ODR[%d]: %d.%03d Hz\r\n", (int)Instance, (int)out_value.out_int,
+               (int)out_value.out_dec);
+    }
 
-    Serialize_s32(&Msg->Data[25], (int32_t)elapsed_time_us, 4);
+    printf("%s", dataOut);
+
+    if (IKS02A1_MOTION_SENSOR_GetFullScale(Instance, MOTION_ACCELERO, &fullScale))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "FS[%d]: ERROR\r\n", (int)Instance);
+    }
+    else
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "FS[%d]: %d g\r\n", (int)Instance, (int)fullScale);
+    }
+
+    printf("%s", dataOut);
   }
 }
 
 /**
-  * @brief  Handles the Infrared data getting/sending
-  * @param  Msg the IR part of the stream
+  * @brief  Handles the gyroscope axes data getting/sending
+  * @param  Instance the device instance
   * @retval None
   */
-static void Infrared_Sensor_Handler(TMsg *Msg)
+static void Gyro_Sensor_Handler(uint32_t Instance)
 {
-  if ((SensorsEnabled & TEMPERATURE_SENSOR) == TEMPERATURE_SENSOR)
+  float odr;
+  int32_t fullScale;
+  IKS02A1_MOTION_SENSOR_Axes_t angular_velocity;
+  displayFloatToInt_t out_value;
+  uint8_t whoami;
+
+  if (IKS02A1_MOTION_SENSOR_GetAxes(Instance, MOTION_GYRO, &angular_velocity))
   {
-    BSP_SENSOR_TEMP_GetTAmbRaw(&TAmbRaw);
-    BSP_SENSOR_TEMP_GetTObjRaw(&TObjRaw);
-
-    Serialize_s32(&Msg->Data[7], (int32_t)TAmbRaw, 4);
-    Serialize_s32(&Msg->Data[11], (int32_t)TObjRaw, 4);
+    snprintf(dataOut, MAX_BUF_SIZE, "\r\nGYR[%d]: Error\r\n", (int)Instance);
   }
-}
-
-/**
-  * @brief  Timer configuration
-  * @param  Freq the desired Timer frequency
-  * @retval None
-  */
-static void TIM_Config(uint32_t Freq)
-{
-  const uint32_t tim_counter_clock = 2000; /* TIM counter clock 2 kHz */
-  uint32_t prescaler_value = (uint32_t)((SystemCoreClock / tim_counter_clock) - 1);
-  uint32_t period = (tim_counter_clock / Freq) - 1;
-
-  BSP_IP_TIM_Handle.Init.Prescaler = prescaler_value;
-  BSP_IP_TIM_Handle.Init.CounterMode = TIM_COUNTERMODE_UP;
-  BSP_IP_TIM_Handle.Init.Period = period;
-  BSP_IP_TIM_Handle.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  BSP_IP_TIM_Handle.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&BSP_IP_TIM_Handle) != HAL_OK)
+  else
   {
-    Error_Handler();
+    snprintf(dataOut, MAX_BUF_SIZE, "\r\nGYR_X[%d]: %d, GYR_Y[%d]: %d, GYR_Z[%d]: %d\r\n", (int)Instance,
+             (int)angular_velocity.x, (int)Instance, (int)angular_velocity.y, (int)Instance, (int)angular_velocity.z);
+  }
+
+  printf("%s", dataOut);
+
+  if (verbose == 1)
+  {
+    if (IKS02A1_MOTION_SENSOR_ReadID(Instance, &whoami))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "WHOAMI[%d]: Error\r\n", (int)Instance);
+    }
+    else
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "WHOAMI[%d]: 0x%x\r\n", (int)Instance, (int)whoami);
+    }
+
+    printf("%s", dataOut);
+
+    if (IKS02A1_MOTION_SENSOR_GetOutputDataRate(Instance, MOTION_GYRO, &odr))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "ODR[%d]: ERROR\r\n", (int)Instance);
+    }
+    else
+    {
+      floatToInt(odr, &out_value, 3);
+      snprintf(dataOut, MAX_BUF_SIZE, "ODR[%d]: %d.%03d Hz\r\n", (int)Instance, (int)out_value.out_int,
+               (int)out_value.out_dec);
+    }
+
+    printf("%s", dataOut);
+
+    if (IKS02A1_MOTION_SENSOR_GetFullScale(Instance, MOTION_GYRO, &fullScale))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "FS[%d]: ERROR\r\n", (int)Instance);
+    }
+    else
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "FS[%d]: %d dps\r\n", (int)Instance, (int)fullScale);
+    }
+
+    printf("%s", dataOut);
   }
 }
 
 /**
-  * @brief  Initialize DWT register for counting clock cycles purpose
-  * @param  None
+  * @brief  Handles the magneto axes data getting/sending
+  * @param  Instance the device instance
   * @retval None
   */
-static void DWT_Init(void)
+static void Magneto_Sensor_Handler(uint32_t Instance)
 {
-  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-  DWT->CTRL &= ~DWT_CTRL_CYCCNTENA_Msk; /* Disable counter */
-}
+  float odr;
+  int32_t fullScale;
+  IKS02A1_MOTION_SENSOR_Axes_t magnetic_field;
+  displayFloatToInt_t out_value;
+  uint8_t whoami;
 
-/**
-  * @brief  Start counting clock cycles
-  * @param  None
-  * @retval None
-  */
-static void DWT_Start(void)
-{
-  DWT->CYCCNT = 0; /* Clear count of clock cycles */
-  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk; /* Enable counter */
-}
+  if (IKS02A1_MOTION_SENSOR_GetAxes(Instance, MOTION_MAGNETO, &magnetic_field))
+  {
+    snprintf(dataOut, MAX_BUF_SIZE, "\r\nMAG[%d]: Error\r\n", (int)Instance);
+  }
+  else
+  {
+    snprintf(dataOut, MAX_BUF_SIZE, "\r\nMAG_X[%d]: %d, MAG_Y[%d]: %d, MAG_Z[%d]: %d\r\n", (int)Instance,
+             (int)magnetic_field.x, (int)Instance, (int)magnetic_field.y, (int)Instance, (int)magnetic_field.z);
+  }
 
-/**
-  * @brief  Stop counting clock cycles and calculate elapsed time in [us]
-  * @param  None
-  * @retval Elapsed time in [us]
-  */
-static uint32_t DWT_Stop(void)
-{
-  volatile uint32_t cycles_count = 0U;
-  uint32_t system_core_clock_mhz = 0U;
+  printf("%s", dataOut);
 
-  DWT->CTRL &= ~DWT_CTRL_CYCCNTENA_Msk; /* Disable counter */
-  cycles_count = DWT->CYCCNT; /* Read count of clock cycles */
+  if (verbose == 1)
+  {
+    if (IKS02A1_MOTION_SENSOR_ReadID(Instance, &whoami))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "WHOAMI[%d]: Error\r\n", (int)Instance);
+    }
+    else
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "WHOAMI[%d]: 0x%x\r\n", (int)Instance, (int)whoami);
+    }
 
-  /* Calculate elapsed time in [us] */
-  system_core_clock_mhz = SystemCoreClock / 1000000U;
-  return cycles_count / system_core_clock_mhz;
+    printf("%s", dataOut);
+
+    if (IKS02A1_MOTION_SENSOR_GetOutputDataRate(Instance, MOTION_MAGNETO, &odr))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "ODR[%d]: ERROR\r\n", (int)Instance);
+    }
+    else
+    {
+      floatToInt(odr, &out_value, 3);
+      snprintf(dataOut, MAX_BUF_SIZE, "ODR[%d]: %d.%03d Hz\r\n", (int)Instance, (int)out_value.out_int,
+               (int)out_value.out_dec);
+    }
+
+    printf("%s", dataOut);
+
+    if (IKS02A1_MOTION_SENSOR_GetFullScale(Instance, MOTION_MAGNETO, &fullScale))
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "FS[%d]: ERROR\r\n", (int)Instance);
+    }
+    else
+    {
+      snprintf(dataOut, MAX_BUF_SIZE, "FS[%d]: %d gauss\r\n", (int)Instance, (int)fullScale);
+    }
+
+    printf("%s", dataOut);
+  }
 }
 
 #ifdef __cplusplus
