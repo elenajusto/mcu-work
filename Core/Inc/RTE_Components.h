@@ -23,7 +23,8 @@
 
 /* Defines ------------------------------------------------------------------*/
 /* STMicroelectronics.X-CUBE-MEMS1.10.0.0 */
-#define IKS02A1
-#define IKS02A1_DATALOGTERMINAL_DEMO
+#define BSP_ENV_SENSORS
+#define STHS34PF80_TEMP_I2C
+#define PRESENCEDETECTION_STHS34PF80_DEMO
 
 #endif /* __RTE_COMPONENTS_H__ */
