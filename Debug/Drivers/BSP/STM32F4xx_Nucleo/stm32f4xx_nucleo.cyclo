@@ -11,5 +11,5 @@
 ../Drivers/BSP/STM32F4xx_Nucleo/stm32f4xx_nucleo.c:300:26:MX_USART2_UART_Init	2
 ../Drivers/BSP/STM32F4xx_Nucleo/stm32f4xx_nucleo.c:402:9:BSP_COM_SelectLogPort	2
 ../Drivers/BSP/STM32F4xx_Nucleo/stm32f4xx_nucleo.c:448:5:__io_putchar	1
-../Drivers/BSP/STM32F4xx_Nucleo/stm32f4xx_nucleo.c:461:13:USART2_MspInit	1
-../Drivers/BSP/STM32F4xx_Nucleo/stm32f4xx_nucleo.c:494:13:USART2_MspDeInit	1
+../Drivers/BSP/STM32F4xx_Nucleo/stm32f4xx_nucleo.c:462:13:USART2_MspInit	1
+../Drivers/BSP/STM32F4xx_Nucleo/stm32f4xx_nucleo.c:511:13:USART2_MspDeInit	1
